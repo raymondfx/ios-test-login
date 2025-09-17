@@ -129,15 +129,25 @@ struct LoginView: View {
         Group {
             // Only show error message if the current state is an error
             if case .error(let message) = viewModel.state {
-                Text(message)
-                    .foregroundColor(.red)
-                    .padding()
-                    .background(Color.red.opacity(0.1))
-                    .cornerRadius(8)
-                    .padding(.horizontal)
-                    .accessibilityIdentifier("errorMessage")
-                    .accessibilityLabel("Error")
-                    .accessibilityValue(message)
+                VStack(spacing: 8) {
+                    Text(message)
+                        .foregroundColor(.red)
+                        .font(.body)
+
+                    // Show failure count when there are failed attempts
+                    if viewModel.failureCount > 0 {
+                        Text("Failed attempts: \(viewModel.failureCount)/\(viewModel.maxFailureAttempts)")
+                            .foregroundColor(.orange)
+                            .font(.caption)
+                    }
+                }
+                .padding()
+                .background(Color.red.opacity(0.1))
+                .cornerRadius(8)
+                .padding(.horizontal)
+                .accessibilityIdentifier("errorMessage")
+                .accessibilityLabel("Error")
+                .accessibilityValue(message)
             }
         }
     }

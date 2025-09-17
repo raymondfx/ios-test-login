@@ -36,7 +36,7 @@ class LoginViewModel: ObservableObject {
     // MARK: - Security Constants
 
     /// Maximum number of failed login attempts before account lockout
-    private let maxFailureAttempts = 3
+    let maxFailureAttempts = 3
 
     /// Duration of account lockout in seconds (5 minutes)
     private let lockoutDuration: TimeInterval = 300
