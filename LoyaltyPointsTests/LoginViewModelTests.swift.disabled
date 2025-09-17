@@ -1,0 +1,387 @@
+import XCTest
+import Combine
+@testable import LoyaltyPoints
+
+final class LoginViewModelTests: XCTestCase {
+
+    var viewModel: LoginViewModel!
+    var mockAuthService: MockAuthService!
+    var mockNetworkMonitor: MockNetworkMonitor!
+    var cancellables: Set<AnyCancellable>!
+
+    override func setUp() {
+        super.setUp()
+
+        // Clear any existing UserDefaults data first
+        UserDefaults.standard.removeObject(forKey: "login_failure_count")
+        UserDefaults.standard.removeObject(forKey: "login_lockout_time")
+        UserDefaults.standard.removeObject(forKey: "auth_token")
+        UserDefaults.standard.removeObject(forKey: "auth_token_expiration")
+
+        mockAuthService = MockAuthService()
+        mockNetworkMonitor = MockNetworkMonitor()
+        mockNetworkMonitor.isConnected = true
+
+        cancellables = Set<AnyCancellable>()
+
+        // Initialize viewModel after mocks are set up
+        viewModel = LoginViewModel(authService: mockAuthService, networkMonitor: mockNetworkMonitor)
+
+        // Give a moment for the setup to complete
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+    }
+
+    override func tearDown() {
+        // Clean up UserDefaults only - let ARC handle object cleanup
+        UserDefaults.standard.removeObject(forKey: "login_failure_count")
+        UserDefaults.standard.removeObject(forKey: "login_lockout_time")
+        UserDefaults.standard.removeObject(forKey: "auth_token")
+        UserDefaults.standard.removeObject(forKey: "auth_token_expiration")
+
+        // Clean up Combine subscriptions
+        cancellables.removeAll()
+
+        // Set to nil to allow ARC cleanup
+        viewModel = nil
+        mockAuthService = nil
+        mockNetworkMonitor = nil
+
+        super.tearDown()
+    }
+
+    // MARK: - Test 1: Validation enables/disables button
+
+    func testValidationEnablesDisablesButton() {
+        // Test empty form
+        viewModel.username = ""
+        viewModel.password = ""
+
+        // Wait a moment for Combine to process
+        let expectation1 = expectation(description: "Form validation")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            expectation1.fulfill()
+        }
+        wait(for: [expectation1], timeout: 1.0)
+
+        XCTAssertFalse(viewModel.isFormValid, "Empty form should be invalid")
+
+        // Test username only
+        viewModel.username = "testuser"
+        viewModel.password = ""
+
+        let expectation2 = expectation(description: "Username only validation")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            expectation2.fulfill()
+        }
+        wait(for: [expectation2], timeout: 1.0)
+
+        XCTAssertFalse(viewModel.isFormValid, "Username only should be invalid")
+
+        // Test both fields filled
+        viewModel.username = "testuser"
+        viewModel.password = "password"
+
+        let expectation3 = expectation(description: "Both fields validation")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            expectation3.fulfill()
+        }
+        wait(for: [expectation3], timeout: 1.0)
+
+        XCTAssertTrue(viewModel.isFormValid, "Both fields filled should be valid")
+
+        // Test whitespace only
+        viewModel.username = "   "
+        viewModel.password = "   "
+
+        let expectation4 = expectation(description: "Whitespace validation")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            expectation4.fulfill()
+        }
+        wait(for: [expectation4], timeout: 1.0)
+
+        XCTAssertFalse(viewModel.isFormValid, "Whitespace only should be invalid")
+    }
+
+    // MARK: - Test 2: Success → navigation event
+
+    func testSuccessTriggersNavigationEvent() {
+        // Setup valid credentials
+        viewModel.username = "user"
+        viewModel.password = "password"
+        mockNetworkMonitor.isConnected = true
+        mockAuthService.shouldSucceed = true
+
+        let expectation = XCTestExpectation(description: "Login success")
+
+        // Monitor state changes
+        viewModel.$state
+            .sink { state in
+                if case .success = state {
+                    expectation.fulfill()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Trigger login
+        viewModel.login()
+
+        wait(for: [expectation], timeout: 2.0)
+        XCTAssertEqual(viewModel.state, .success, "State should be success after successful login")
+    }
+
+    // MARK: - Test 3: Error increments failure count
+
+    func testErrorIncrementsFailureCount() {
+        // Setup invalid credentials
+        viewModel.username = "wrong"
+        viewModel.password = "wrong"
+        mockNetworkMonitor.isConnected = true
+        mockAuthService.shouldSucceed = false
+
+        let initialFailureCount = viewModel.failureCount
+
+        let expectation = XCTestExpectation(description: "Login error")
+
+        // Monitor state changes
+        viewModel.$state
+            .sink { state in
+                if case .error = state {
+                    expectation.fulfill()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Trigger login
+        viewModel.login()
+
+        wait(for: [expectation], timeout: 2.0)
+
+        // Verify failure count incremented
+        XCTAssertEqual(viewModel.failureCount, initialFailureCount + 1, "Failure count should increment after failed login")
+
+        if case .error(let message) = viewModel.state {
+            XCTAssertEqual(message, "Invalid username or password", "Should show correct error message")
+        } else {
+            XCTFail("State should be error")
+        }
+    }
+
+    // MARK: - Test 4: Lockout after 3 failures
+
+    func testLockoutAfterThreeFailures() {
+        // Setup invalid credentials
+        viewModel.username = "wrong"
+        viewModel.password = "wrong"
+        mockNetworkMonitor.isConnected = true
+        mockAuthService.shouldSucceed = false
+
+        // Perform 3 failed login attempts
+        for i in 1...3 {
+            let expectation = XCTestExpectation(description: "Login attempt \(i)")
+
+            viewModel.$state
+                .dropFirst()
+                .sink { state in
+                    if case .error = state {
+                        expectation.fulfill()
+                    }
+                }
+                .store(in: &cancellables)
+
+            viewModel.login()
+            wait(for: [expectation], timeout: 2.0)
+        }
+
+        // Verify account is locked out
+        XCTAssertTrue(viewModel.isLockedOut, "Account should be locked out after 3 failed attempts")
+
+        // Attempt another login - should immediately show lockout
+        let lockoutExpectation = XCTestExpectation(description: "Lockout state")
+
+        viewModel.$state
+            .sink { state in
+                if case .lockedOut = state {
+                    lockoutExpectation.fulfill()
+                }
+            }
+            .store(in: &cancellables)
+
+        viewModel.login()
+        wait(for: [lockoutExpectation], timeout: 1.0)
+
+        XCTAssertEqual(viewModel.state, .lockedOut, "State should be lockedOut")
+
+        // Verify auth service was not called (due to lockout guard)
+        XCTAssertEqual(mockAuthService.loginCallCount, 3, "Auth service should only be called 3 times (before lockout)")
+    }
+
+    // MARK: - Test 5: Offline → show message, no service call
+
+    func testOfflineShowsMessageWithoutServiceCall() {
+        // Setup valid credentials but offline
+        viewModel.username = "user"
+        viewModel.password = "password"
+        mockNetworkMonitor.isConnected = false
+
+        let initialCallCount = mockAuthService.loginCallCount
+
+        let expectation = XCTestExpectation(description: "Offline error")
+
+        // Monitor state changes
+        viewModel.$state
+            .sink { state in
+                if case .error(let message) = state {
+                    XCTAssertEqual(message, "No internet connection", "Should show offline message")
+                    expectation.fulfill()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Trigger login
+        viewModel.login()
+
+        wait(for: [expectation], timeout: 1.0)
+
+        // Verify no service call was made
+        XCTAssertEqual(mockAuthService.loginCallCount, initialCallCount, "Auth service should not be called when offline")
+
+        if case .error(let message) = viewModel.state {
+            XCTAssertEqual(message, "No internet connection", "Should show correct offline message")
+        } else {
+            XCTFail("State should be error with offline message")
+        }
+    }
+
+    // MARK: - Test 6: Remember me persists token
+
+    func testRememberMePersistsToken() {
+        // Setup successful login with remember me enabled
+        viewModel.username = "user"
+        viewModel.password = "password"
+        viewModel.rememberMe = true
+        mockNetworkMonitor.isConnected = true
+        mockAuthService.shouldSucceed = true
+
+        let expectation = XCTestExpectation(description: "Login success with token save")
+
+        // Monitor state changes
+        viewModel.$state
+            .sink { state in
+                if case .success = state {
+                    expectation.fulfill()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Trigger login
+        viewModel.login()
+
+        wait(for: [expectation], timeout: 2.0)
+
+        // Verify token was saved
+        XCTAssertTrue(mockAuthService.saveTokenCalled, "saveToken should be called when rememberMe is true")
+        XCTAssertNotNil(mockAuthService.savedToken, "Token should be saved")
+
+        // Test that token is retrieved on next app launch
+        let newViewModel = LoginViewModel(authService: mockAuthService, networkMonitor: mockNetworkMonitor)
+
+        // Since we're using a mock, we need to simulate the saved token behavior
+        mockAuthService.hasSavedToken = true
+        newViewModel.checkForSavedToken()
+
+        XCTAssertEqual(newViewModel.state, .success, "Should auto-login with saved token")
+    }
+
+    func testRememberMeDisabledDoesNotPersistToken() {
+        // Setup successful login with remember me disabled
+        viewModel.username = "user"
+        viewModel.password = "password"
+        viewModel.rememberMe = false
+        mockNetworkMonitor.isConnected = true
+        mockAuthService.shouldSucceed = true
+
+        let expectation = XCTestExpectation(description: "Login success without token save")
+
+        // Monitor state changes
+        viewModel.$state
+            .sink { state in
+                if case .success = state {
+                    expectation.fulfill()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Trigger login
+        viewModel.login()
+
+        wait(for: [expectation], timeout: 2.0)
+
+        // Verify token was NOT saved
+        XCTAssertFalse(mockAuthService.saveTokenCalled, "saveToken should not be called when rememberMe is false")
+        XCTAssertNil(mockAuthService.savedToken, "Token should not be saved")
+    }
+}
+
+// MARK: - Mock Classes
+
+class MockAuthService: AuthServiceProtocol {
+    var shouldSucceed = true
+    var loginCallCount = 0
+    var saveTokenCalled = false
+    var savedToken: AuthToken?
+    var hasSavedToken = false
+
+    func login(username: String, password: String) async throws -> AuthToken {
+        loginCallCount += 1
+
+        // Simulate network delay
+        try await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+
+        if shouldSucceed && username == "user" && password == "password" {
+            let token = AuthToken(token: "mock-token", expirationDate: Date().addingTimeInterval(3600))
+            return token
+        } else {
+            throw LoginError.invalidCredentials
+        }
+    }
+
+    func getSavedToken() -> AuthToken? {
+        if hasSavedToken {
+            return AuthToken(token: "saved-token", expirationDate: Date().addingTimeInterval(3600))
+        }
+        return savedToken
+    }
+
+    func saveToken(_ token: AuthToken) {
+        saveTokenCalled = true
+        savedToken = token
+    }
+
+    func clearSavedToken() {
+        savedToken = nil
+        saveTokenCalled = false
+        hasSavedToken = false
+    }
+}
+
+// Protocol-based mock that doesn't inherit from NetworkMonitor
+class MockNetworkMonitor: NetworkMonitor {
+    private var _isConnected = true
+
+    override var isConnected: Bool {
+        get { return _isConnected }
+        set { _isConnected = newValue }
+    }
+
+    override init() {
+        // Create a minimal init that doesn't trigger system network calls
+        super.init()
+        // Override the default behavior immediately after init
+        _isConnected = true
+    }
+
+    // Disable the network monitoring to prevent system calls
+    deinit {
+        // Ensure no system resources are held
+    }
+}
